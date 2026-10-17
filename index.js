@@ -284,7 +284,7 @@ app.post("/log", async (req, res) => {
 app.post("/action", async (req, res) => {
   try {
     const { type, userId, username, reason, moderator, moderatorId } = req.body;
-    const titulos = { kick: "Kick", serverban: "Server Ban", tp: "Teleport" };
+    const titulos = { kick: "Kick", serverban: "Server Ban", unserverban: "Server Unban", unban: "Unban", tp: "Teleport" };
     if (!titulos[type] || !Number.isInteger(userId)) return res.status(400).json({ error: "datos inválidos" });
 
     const embed = new EmbedBuilder()
@@ -293,7 +293,7 @@ app.post("/action", async (req, res) => {
       .setDescription(`**${username}** (${userId})`)
       .addFields({ name: "Moderator", value: `${moderator || "?"} (${moderatorId || "?"})` })
       .setTimestamp();
-    if (type !== "tp") embed.addFields({ name: "Reason", value: String(reason || "N/A").slice(0, 1000) });
+    if (type !== "tp" && type !== "unserverban") embed.addFields({ name: "Reason", value: String(reason || "N/A").slice(0, 1000) });
     const avatar = await avatarDe(userId);
     if (avatar) embed.setThumbnail(avatar);
 
