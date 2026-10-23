@@ -521,4 +521,39 @@ setTimeout(() => {
   }
 }, 45000);
 
+// Reintento automático: si Discord no conecta, reinicia el login cada 90 s
+setInterval(async () => {
+  if (client.isReady()) return;
+  console.warn("[Discord] Sigue sin conectar: reiniciando el login...");
+  try {
+    client.destroy();
+  } catch {}
+  try {
+    await client.login(DISCORD_TOKEN);
+  } catch (e) {
+    console.error("[Discord] Reintento de login falló:", e.message, "| código:", e.code || "sin código");
+  }
+}, 90 * 1000);
+
+// Prueba directa a la API de Discord: dice POR QUÉ no conecta (token inválido, IP bloqueada, sin red...)
+async function pruebaDiscord() {
+  const headers = { Authorization: `Bot ${DISCORD_TOKEN}` };
+  for (const [nombre, url] of [
+    ["REST /users/@me", "https://discord.com/api/v10/users/@me"],
+    ["REST /gateway/bot", "https://discord.com/api/v10/gateway/bot"],
+  ]) {
+    try {
+      const r = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
+      const t = (await r.text()).replace(/\s+/g, " ").slice(0, 250);
+      console.log(`[Discord test] ${nombre} -> ${r.status} ${t}`);
+      if (r.status === 401) console.log("[Discord test] 401 = el token es INVÁLIDO (regenéralo en Discord Developer Portal > Bot > Reset Token y actualiza DISCORD_TOKEN en Render).");
+      if (r.status === 403 || r.status === 429) console.log("[Discord test] 403/429 = Discord/Cloudflare está bloqueando o limitando la IP de Render.");
+    } catch (e) {
+      console.log(`[Discord test] ${nombre} -> FALLÓ: ${e.name} ${e.message} (sin conexión con Discord o timeout)`);
+    }
+  }
+}
+
+pruebaDiscord();
 autoPrueba();
+
