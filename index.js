@@ -1,3 +1,4 @@
+
 // =====================================================
 // ModBot: puente entre Roblox y Discord  -- VERSIÓN CORREGIDA
 // Roblox -> /requestban -> mensaje con botones -> aprobar -> ban en Roblox
@@ -12,8 +13,8 @@
 //   - NUEVO: diagnóstico extra al conectar con Discord (para detectar logins "colgados")
 //   - NUEVO: logs de debug SIN FILTRAR para ver exactamente dónde se atasca la conexión
 // =====================================================
-const express = require("express");
-const {
+const dns = require("node:dns");
+dns.setDefaultResultOrder("ipv4first");
   Client,
   Events,
   GatewayIntentBits,
