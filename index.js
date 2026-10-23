@@ -521,7 +521,8 @@ setTimeout(() => {
   }
 }, 45000);
 
-// Reintento automático: si Discord no conecta, reinicia el login cada 90 s
+// Reintento automático: si Discord no conecta, reinicia el login cada 15 min
+// (más seguido empeora el bloqueo de Cloudflare cuando la IP está limitada)
 setInterval(async () => {
   if (client.isReady()) return;
   console.warn("[Discord] Sigue sin conectar: reiniciando el login...");
@@ -533,7 +534,7 @@ setInterval(async () => {
   } catch (e) {
     console.error("[Discord] Reintento de login falló:", e.message, "| código:", e.code || "sin código");
   }
-}, 90 * 1000);
+}, 15 * 60 * 1000);
 
 // Prueba directa a la API de Discord: dice POR QUÉ no conecta (token inválido, IP bloqueada, sin red...)
 async function pruebaDiscord() {
@@ -556,4 +557,3 @@ async function pruebaDiscord() {
 
 pruebaDiscord();
 autoPrueba();
-
