@@ -47,6 +47,9 @@ const TOPIC = "ModAction"; // el mismo topic que escucha tu script de Roblox
 const CANAL_ACCIONES = process.env.CANAL_ACCIONES || "1560847732753702973";
 const ROL_REVISION = process.env.ROL_REVISION || "1460341508577427732";
 
+// Rol que se etiqueta con /level /slot /tp all /tp user user /shutdown
+const ROL_ALERTA = process.env.ROL_ALERTA || "1562872203928670228";
+
 // Canal donde se registra el chat del juego
 const CANAL_CHAT = process.env.CANAL_CHAT || "1560851695565672458";
 
@@ -280,12 +283,28 @@ app.post("/log", async (req, res) => {
   }
 });
 
-// Registro de acciones: /kick /serverban /tp
+// Registro de acciones: /kick /serverban /tp + alertas (/level /slot /tp all /tp user user /shutdown)
 app.post("/action", async (req, res) => {
   try {
     const { type, userId, username, reason, moderator, moderatorId } = req.body;
-    const titulos = { kick: "Kick", serverban: "Server Ban", unserverban: "Server Unban", unban: "Unban", tp: "Teleport" };
+    const titulos = {
+      kick: "Kick",
+      serverban: "Server Ban",
+      unserverban: "Server Unban",
+      unban: "Unban",
+      tp: "Teleport",
+      level: "Level Changed",
+      slot: "Slot Changed",
+      tpall: "Teleport All",
+      tpmove: "Teleport Player",
+      shutdown: "Server Shutdown",
+    };
+    // Tipos que etiquetan al rol de alertas
+    const alertas = new Set(["level", "slot", "tpall", "tpmove", "shutdown"]);
+
     if (!titulos[type] || !Number.isInteger(userId)) return res.status(400).json({ error: "datos inválidos" });
+
+    const esAlerta = alertas.has(type);
 
     const embed = new EmbedBuilder()
       .setTitle(titulos[type])
@@ -293,13 +312,23 @@ app.post("/action", async (req, res) => {
       .setDescription(`**${username}** (${userId})`)
       .addFields({ name: "Moderator", value: `${moderator || "?"} (${moderatorId || "?"})` })
       .setTimestamp();
-    if (type !== "tp" && type !== "unserverban") embed.addFields({ name: "Reason", value: String(reason || "N/A").slice(0, 1000) });
-    const avatar = await avatarDe(userId);
-    if (avatar) embed.setThumbnail(avatar);
+    if (esAlerta) {
+      embed.addFields({ name: "Details", value: String(reason || "N/A").slice(0, 1000) });
+    } else if (type !== "tp" && type !== "unserverban") {
+      embed.addFields({ name: "Reason", value: String(reason || "N/A").slice(0, 1000) });
+    }
+    if (userId > 0) {
+      const avatar = await avatarDe(userId);
+      if (avatar) embed.setThumbnail(avatar);
+    }
 
     const mensaje = { embeds: [embed] };
-    // Los /tp se registran sin etiquetar roles y sin botón; el resto sí
-    if (type !== "tp") {
+    if (esAlerta) {
+      // Alertas: etiquetan al rol de alertas, sin botón
+      mensaje.content = `<@&${ROL_ALERTA}>`;
+      mensaje.allowedMentions = { roles: [ROL_ALERTA] };
+    } else if (type !== "tp") {
+      // Los /tp se registran sin etiquetar roles y sin botón; el resto sí
       mensaje.content = `<@&${ROL_REVISION}>`;
       mensaje.components = [
         new ActionRowBuilder().addComponents(
