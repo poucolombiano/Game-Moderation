@@ -1,6 +1,7 @@
 // =====================================================
 // ModBot: puente entre Roblox y Discord
 // Roblox -> /requestban -> mensaje con botones -> aprobar -> ban en Roblox
+// + /modlist: mensajes por semana de los usuarios con los roles de staff
 // =====================================================
 const express = require("express");
 const {
@@ -53,6 +54,16 @@ const ROL_ALERTA = process.env.ROL_ALERTA || "1562872203928670228";
 // Canal donde se registra el chat del juego
 const CANAL_CHAT = process.env.CANAL_CHAT || "1560851695565672458";
 
+// Roles cuyos mensajes se cuentan para /modlist (en este orden se muestran)
+const ROLES_STAFF = ["1460341572703883408", "1557087788845899807"];
+
+// DataStore (Roblox) donde se guardan los conteos, así no se pierden al reiniciar Render
+const STATS_STORE = "ModStats_v1";
+const STATS_KEY = "stats";
+
+// Las semanas van de lunes a domingo, en hora de Colombia (UTC-5)
+const OFFSET_HORAS = -5;
+
 // ─────────────────────────────────────────────────────
 // Roblox (Open Cloud)
 // ─────────────────────────────────────────────────────
@@ -92,9 +103,110 @@ async function avatarDe(userId) {
 }
 
 // ─────────────────────────────────────────────────────
+// Conteo de mensajes por semana (/modlist)
+// datos = { "2026-11-09": { "userId": cantidad } }  (la clave es el lunes de esa semana)
+// ─────────────────────────────────────────────────────
+const URL_STATS =
+  `https://apis.roblox.com/datastores/v1/universes/${ROBLOX_UNIVERSE_ID}` +
+  `/standard-datastores/datastore/entries/entry` +
+  `?datastoreName=${STATS_STORE}&entryKey=${STATS_KEY}`;
+
+let datos = {};
+let cargado = false;
+let sucio = false;
+
+function inicioSemana(ts) {
+  const d = new Date(ts + OFFSET_HORAS * 3600 * 1000);
+  const diff = (d.getUTCDay() + 6) % 7; // lunes = 0
+  d.setUTCDate(d.getUTCDate() - diff);
+  return d.toISOString().slice(0, 10);
+}
+
+function sumar(a, b) {
+  const res = {};
+  for (const fuente of [a, b]) {
+    for (const [semana, usuarios] of Object.entries(fuente || {})) {
+      res[semana] = res[semana] || {};
+      for (const [id, n] of Object.entries(usuarios)) {
+        res[semana][id] = (res[semana][id] || 0) + n;
+      }
+    }
+  }
+  return res;
+}
+
+function limpiarViejas() {
+  const limite = inicioSemana(Date.now() - 21 * 24 * 3600 * 1000);
+  for (const semana of Object.keys(datos)) {
+    if (semana < limite) delete datos[semana];
+  }
+}
+
+async function cargarStats() {
+  const r = await fetch(URL_STATS, { headers: { "x-api-key": ROBLOX_API_KEY } });
+  if (r.status === 404) return {}; // todavía no existe: empezamos de cero
+  if (!r.ok) throw new Error(`DataStore ${r.status}: ${await r.text()}`);
+  return await r.json();
+}
+
+async function intentarCargar() {
+  if (cargado) return;
+  try {
+    const guardado = await cargarStats();
+    datos = sumar(guardado, datos); // suma lo que se contó mientras no se pudo cargar
+    cargado = true;
+    sucio = true;
+    console.log("[Stats] Conteos cargados.");
+  } catch (e) {
+    console.error("[Stats] No se pudieron cargar los conteos (se reintenta):", e.message);
+  }
+}
+
+async function guardarStats() {
+  if (!cargado || !sucio) return;
+  sucio = false;
+  limpiarViejas();
+  try {
+    const r = await fetch(URL_STATS, {
+      method: "POST",
+      headers: { "x-api-key": ROBLOX_API_KEY, "content-type": "application/json" },
+      body: JSON.stringify(datos),
+    });
+    if (!r.ok) throw new Error(`DataStore ${r.status}: ${await r.text()}`);
+  } catch (e) {
+    sucio = true;
+    console.error("[Stats] No se pudieron guardar los conteos:", e.message);
+  }
+}
+
+function contarMensaje(userId) {
+  const semana = inicioSemana(Date.now());
+  datos[semana] = datos[semana] || {};
+  datos[semana][userId] = (datos[semana][userId] || 0) + 1;
+  sucio = true;
+}
+
+intentarCargar();
+setInterval(async () => {
+  await intentarCargar();
+  await guardarStats();
+}, 60 * 1000);
+
+process.on("SIGTERM", async () => {
+  await guardarStats();
+  process.exit(0);
+});
+
+// ─────────────────────────────────────────────────────
 // Discord
 // ─────────────────────────────────────────────────────
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers, // para listar a los usuarios de cada rol
+    GatewayIntentBits.GuildMessages, // para contar mensajes
+  ],
+});
 
 async function canal(id) {
   return client.channels.fetch(id);
@@ -120,7 +232,105 @@ function campo(embed, nombre) {
   return embed.fields.find((f) => f.name === nombre)?.value || "N/A";
 }
 
+// Cuenta TODOS los mensajes (texto, stickers, gifs, fotos, tickets...) de usuarios con los roles de staff
+client.on("messageCreate", (m) => {
+  if (!m.guild || m.author.bot || m.webhookId || m.system) return;
+  const roles = m.member?.roles?.cache;
+  if (!roles) return;
+  if (!ROLES_STAFF.some((id) => roles.has(id))) return;
+  contarMensaje(m.author.id);
+});
+
+function construirEmbeds(titulo, lineas) {
+  const textos = [];
+  let desc = `# ${titulo} MESSAGES\n\n`;
+  if (!lineas.length) desc += "Sin usuarios con este rol.\n";
+  for (const l of lineas) {
+    if ((desc + l).length > 3800) {
+      textos.push(desc);
+      desc = "";
+    }
+    desc += l + "\n\n";
+  }
+  textos.push(desc);
+  return textos.map((t) => new EmbedBuilder().setColor(0xFFFFFF).setDescription(t));
+}
+
+async function comandoModList(interaction) {
+  const puede = interaction.member?.roles?.cache?.some(
+    (r) => r.id === ROL_REVISION || ROLES.includes(r.id)
+  );
+  if (!puede) {
+    return interaction.reply({
+      content: "You do not have permission to use this command.",
+      ephemeral: true,
+    });
+  }
+
+  await interaction.deferReply();
+
+  const semanaActual = inicioSemana(Date.now());
+  const semanaPasada = inicioSemana(Date.now() - 7 * 24 * 3600 * 1000);
+  const esta = datos[semanaActual] || {};
+  const pasada = datos[semanaPasada] || {};
+
+  await interaction.guild.members.fetch();
+
+  const embeds = [];
+  for (const rolId of ROLES_STAFF) {
+    const rol = interaction.guild.roles.cache.get(rolId);
+    if (!rol) continue;
+
+    const lineas = [...rol.members.values()]
+      .filter((mb) => !mb.user.bot)
+      .map((mb) => ({
+        tag: mb.user.tag,
+        id: mb.id,
+        esta: esta[mb.id] || 0,
+        pasada: pasada[mb.id] || 0,
+      }))
+      .sort((a, b) => b.esta - a.esta || b.pasada - a.pasada)
+      .map(
+        (u) =>
+          `**${escapeMarkdown(u.tag)}**\nThis Week: ${u.esta}\nLast Week: ${u.pasada}`
+      );
+
+    embeds.push(...construirEmbeds(rol.name, lineas));
+  }
+
+  if (!embeds.length) {
+    return interaction.editReply("No encontré ninguno de los roles en este servidor.");
+  }
+
+  embeds[embeds.length - 1].setFooter({
+    text: "Semanas de lunes a domingo (hora Colombia)",
+  });
+
+  // Discord permite máximo 10 embeds por mensaje
+  await interaction.editReply({ embeds: embeds.slice(0, 10) });
+  for (let i = 10; i < embeds.length; i += 10) {
+    await interaction.followUp({ embeds: embeds.slice(i, i + 10) });
+  }
+}
+
 client.on("interactionCreate", async (interaction) => {
+  if (interaction.isChatInputCommand()) {
+    if (interaction.commandName === "modlist") {
+      try {
+        await comandoModList(interaction);
+      } catch (e) {
+        console.error(e);
+        const texto = "An error occurred: " + e.message;
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply(texto).catch(() => {});
+        } else {
+          await interaction.reply({ content: texto, ephemeral: true }).catch(() => {});
+        }
+      }
+    }
+    return;
+  }
+
   if (!interaction.isButton()) return;
 
   // Botón "Reviewed" de los registros de acciones (/kick /serverban /tp)
@@ -207,7 +417,20 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-client.once("ready", () => console.log(`Bot conectado como ${client.user.tag}`));
+client.once("ready", async () => {
+  console.log(`Bot conectado como ${client.user.tag}`);
+  // Registra /modlist en cada servidor donde está el bot (aparece al instante)
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      await guild.commands.create({
+        name: "modlist",
+        description: "Muestra los mensajes de esta semana y la pasada de los usuarios con rol de staff",
+      });
+    } catch (e) {
+      console.error(`No se pudo registrar /modlist en ${guild.name}:`, e.message);
+    }
+  }
+});
 
 // ─────────────────────────────────────────────────────
 // Servidor web (lo llama Roblox)
