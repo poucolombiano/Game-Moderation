@@ -374,7 +374,14 @@ async function comandoRequestBan(interaction) {
     });
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  // Respuesta pública: el embed de confirmación se ve en el chat
+  await interaction.deferReply();
+
+  // Los errores se muestran solo a quien ejecutó el comando
+  const errorPrivado = async (texto) => {
+    await interaction.deleteReply().catch(() => {});
+    await interaction.followUp({ content: texto, ephemeral: true });
+  };
 
   const nombre = interaction.options.getString("username", true).trim();
   const razon = interaction.options.getString("reason", true).trim();
@@ -383,10 +390,10 @@ async function comandoRequestBan(interaction) {
   try {
     usuario = await buscarUsuarioRoblox(nombre);
   } catch (e) {
-    return interaction.editReply("No pude consultar Roblox: " + e.message);
+    return errorPrivado("No pude consultar Roblox: " + e.message);
   }
   if (!usuario) {
-    return interaction.editReply(`No encontré al usuario de Roblox: ${nombre}`);
+    return errorPrivado(`No encontré al usuario de Roblox: ${nombre}`);
   }
 
   await enviarSolicitudBan({
@@ -397,9 +404,18 @@ async function comandoRequestBan(interaction) {
     requestedById: interaction.user.id,
   });
 
-  await interaction.editReply(
-    `Solicitud de ban enviada para **${escapeMarkdown(usuario.name)}** (${usuario.id}). Espera la aprobación.`
-  );
+  const confirmacion = new EmbedBuilder()
+    .setColor(0xFFFFFF)
+    .setDescription(
+      `Hej! haz solicitado la prohibicion de **${escapeMarkdown(usuario.name)}**\n` +
+        `Hemos notificado a un Administrador que revisara la solicitud\n` +
+        `Asegurate de subir las evidencias a el canal: https://discord.com/channels/1442882285891489824/1492994084334207026\n` +
+        `Si las evidencias no estan luego de un dia, es posible que seas degradado por abuso administrativo.`
+    );
+  const avatar = await avatarDe(usuario.id);
+  if (avatar) confirmacion.setThumbnail(avatar);
+
+  await interaction.editReply({ embeds: [confirmacion] });
 }
 
 client.on("interactionCreate", async (interaction) => {
@@ -525,7 +541,7 @@ client.once("ready", async () => {
     try {
       await guild.commands.create({
         name: "modlist",
-        description: "Muestra los mensajes de esta semana y la pasada de los usuarios con rol de staff",
+        description: "Shows this week's and last week's message counts for users with staff roles",
       });
     } catch (e) {
       console.error(`No se pudo registrar /modlist en ${guild.name}:`, e.message);
@@ -533,17 +549,17 @@ client.once("ready", async () => {
     try {
       await guild.commands.create({
         name: "requestban",
-        description: "Envía una solicitud de baneo para un usuario de Roblox",
+        description: "Sends a ban request for a Roblox user",
         options: [
           {
             name: "username",
-            description: "Username de Roblox del jugador",
+            description: "Roblox username of the player",
             type: 3, // STRING
             required: true,
           },
           {
             name: "reason",
-            description: "Razón del baneo",
+            description: "Reason for the ban",
             type: 3, // STRING
             required: true,
             max_length: 500,
