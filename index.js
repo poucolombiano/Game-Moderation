@@ -1,6 +1,7 @@
 // =====================================================
 // ModBot: puente entre Roblox y Discord
 // Roblox -> /requestban -> mensaje con botones -> aprobar -> ban en Roblox
+// Discord -> /requestban Username Reason -> mismo mensaje con botones
 // + /modlist: mensajes por semana de los usuarios con los roles de staff
 // =====================================================
 const express = require("express");
@@ -57,6 +58,14 @@ const CANAL_CHAT = process.env.CANAL_CHAT || "1560851695565672458";
 // Roles cuyos mensajes se cuentan para /modlist (en este orden se muestran)
 const ROLES_STAFF = ["1460341572703883408", "1557087788845899807"];
 
+// Roles que pueden usar /requestban desde Discord
+const ROLES_REQUESTBAN = [
+  "1562872203928670228",
+  "1460341508577427732",
+  "1460341572703883408",
+  "1557087788845899807",
+];
+
 // DataStore (Roblox) donde se guardan los conteos, así no se pierden al reiniciar Render
 const STATS_STORE = "ModStats_v1";
 const STATS_KEY = "stats";
@@ -100,6 +109,19 @@ async function avatarDe(userId) {
   } catch {
     return null;
   }
+}
+
+// Convierte un username de Roblox en { id, name } (o null si no existe)
+async function buscarUsuarioRoblox(username) {
+  const r = await fetch("https://users.roblox.com/v1/usernames/users", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ usernames: [username], excludeBannedUsers: false }),
+  });
+  if (!r.ok) throw new Error(`Roblox Users ${r.status}`);
+  const j = await r.json();
+  const u = j.data?.[0];
+  return u ? { id: u.id, name: u.name } : null;
 }
 
 // ─────────────────────────────────────────────────────
@@ -228,6 +250,35 @@ async function enviarRegistro({ titulo, color, userId, username, reason, admin }
   await ch.send({ embeds: [embed] });
 }
 
+// Publica la solicitud de ban con botones (la usan el juego y el comando de Discord)
+async function enviarSolicitudBan({ userId, username, reason, requestedBy, requestedById }) {
+  const embed = new EmbedBuilder()
+    .setTitle("Request Ban")
+    .setColor(0xFFFFFF)
+    .addFields(
+      { name: "Username", value: String(username), inline: true },
+      { name: "UserID", value: String(userId), inline: true },
+      { name: "Reason", value: String(reason || "N/A").slice(0, 1000) },
+      { name: "Requested by", value: `${requestedBy || "?"} (${requestedById || "?"})`, inline: true }
+    )
+    .setTimestamp();
+  const avatar = await avatarDe(userId);
+  if (avatar) embed.setThumbnail(avatar);
+
+  const botones = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`approve:${userId}`).setLabel("Approve").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`deny:${userId}`).setLabel("Disapprove").setStyle(ButtonStyle.Danger)
+  );
+
+  const ch = await canal(CANAL_SOLICITUDES);
+  await ch.send({
+    content: ROLES.map((id) => `<@&${id}>`).join(" "),
+    embeds: [embed],
+    components: [botones],
+    allowedMentions: { roles: ROLES },
+  });
+}
+
 function campo(embed, nombre) {
   return embed.fields.find((f) => f.name === nombre)?.value || "N/A";
 }
@@ -313,11 +364,61 @@ async function comandoModList(interaction) {
   }
 }
 
+// /requestban Username Reason  (desde Discord)
+async function comandoRequestBan(interaction) {
+  const puede = interaction.member?.roles?.cache?.some((r) => ROLES_REQUESTBAN.includes(r.id));
+  if (!puede) {
+    return interaction.reply({
+      content: "You do not have permission to use this command.",
+      ephemeral: true,
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const nombre = interaction.options.getString("username", true).trim();
+  const razon = interaction.options.getString("reason", true).trim();
+
+  let usuario;
+  try {
+    usuario = await buscarUsuarioRoblox(nombre);
+  } catch (e) {
+    return interaction.editReply("No pude consultar Roblox: " + e.message);
+  }
+  if (!usuario) {
+    return interaction.editReply(`No encontré al usuario de Roblox: ${nombre}`);
+  }
+
+  await enviarSolicitudBan({
+    userId: usuario.id,
+    username: usuario.name,
+    reason: razon,
+    requestedBy: `${interaction.user.username} [Discord]`,
+    requestedById: interaction.user.id,
+  });
+
+  await interaction.editReply(
+    `Solicitud de ban enviada para **${escapeMarkdown(usuario.name)}** (${usuario.id}). Espera la aprobación.`
+  );
+}
+
 client.on("interactionCreate", async (interaction) => {
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === "modlist") {
       try {
         await comandoModList(interaction);
+      } catch (e) {
+        console.error(e);
+        const texto = "An error occurred: " + e.message;
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply(texto).catch(() => {});
+        } else {
+          await interaction.reply({ content: texto, ephemeral: true }).catch(() => {});
+        }
+      }
+    } else if (interaction.commandName === "requestban") {
+      try {
+        await comandoRequestBan(interaction);
       } catch (e) {
         console.error(e);
         const texto = "An error occurred: " + e.message;
@@ -419,7 +520,7 @@ client.on("interactionCreate", async (interaction) => {
 
 client.once("ready", async () => {
   console.log(`Bot conectado como ${client.user.tag}`);
-  // Registra /modlist en cada servidor donde está el bot (aparece al instante)
+  // Registra /modlist y /requestban en cada servidor donde está el bot (aparecen al instante)
   for (const guild of client.guilds.cache.values()) {
     try {
       await guild.commands.create({
@@ -428,6 +529,29 @@ client.once("ready", async () => {
       });
     } catch (e) {
       console.error(`No se pudo registrar /modlist en ${guild.name}:`, e.message);
+    }
+    try {
+      await guild.commands.create({
+        name: "requestban",
+        description: "Envía una solicitud de baneo para un usuario de Roblox",
+        options: [
+          {
+            name: "username",
+            description: "Username de Roblox del jugador",
+            type: 3, // STRING
+            required: true,
+          },
+          {
+            name: "reason",
+            description: "Razón del baneo",
+            type: 3, // STRING
+            required: true,
+            max_length: 500,
+          },
+        ],
+      });
+    } catch (e) {
+      console.error(`No se pudo registrar /requestban en ${guild.name}:`, e.message);
     }
   }
 });
@@ -454,31 +578,7 @@ app.post("/requestban", async (req, res) => {
     const { userId, username, reason, requestedBy, requestedById } = req.body;
     if (!Number.isInteger(userId) || !username) return res.status(400).json({ error: "datos inválidos" });
 
-    const embed = new EmbedBuilder()
-      .setTitle("Request Ban")
-      .setColor(0xFFFFFF)
-      .addFields(
-        { name: "Username", value: String(username), inline: true },
-        { name: "UserID", value: String(userId), inline: true },
-        { name: "Reason", value: String(reason || "N/A").slice(0, 1000) },
-        { name: "Requested by", value: `${requestedBy || "?"} (${requestedById || "?"})`, inline: true }
-      )
-      .setTimestamp();
-    const avatar = await avatarDe(userId);
-    if (avatar) embed.setThumbnail(avatar);
-
-    const botones = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`approve:${userId}`).setLabel("Approve").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`deny:${userId}`).setLabel("Disapprove").setStyle(ButtonStyle.Danger)
-    );
-
-    const ch = await canal(CANAL_SOLICITUDES);
-    await ch.send({
-      content: ROLES.map((id) => `<@&${id}>`).join(" "),
-      embeds: [embed],
-      components: [botones],
-      allowedMentions: { roles: ROLES },
-    });
+    await enviarSolicitudBan({ userId, username, reason, requestedBy, requestedById });
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
