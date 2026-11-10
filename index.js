@@ -407,10 +407,10 @@ async function comandoRequestBan(interaction) {
   const confirmacion = new EmbedBuilder()
     .setColor(0xFFFFFF)
     .setDescription(
-      `Hej! haz solicitado la prohibicion de **${escapeMarkdown(usuario.name)}**\n` +
-        `Hemos notificado a un Administrador que revisara la solicitud\n` +
-        `Asegurate de subir las evidencias a el canal: https://discord.com/channels/1442882285891489824/1492994084334207026\n` +
-        `Si las evidencias no estan luego de un dia, es posible que seas degradado por abuso administrativo.`
+      `Hey! You have requested the ban of **${escapeMarkdown(usuario.name)}**\n` +
+        `We have notified an Administrator who will review the request\n` +
+        `Make sure to upload the evidence to the channel: https://discord.com/channels/1442882285891489824/1492994084334207026\n` +
+        `If the evidence is not there after one day, you may be demoted for administrative abuse.`
     );
   const avatar = await avatarDe(usuario.id);
   if (avatar) confirmacion.setThumbnail(avatar);
