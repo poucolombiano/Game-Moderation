@@ -4,6 +4,7 @@
 // Discord -> /requestban Username Reason -> mismo mensaje con botones
 // + /modlist: mensajes por semana de los usuarios con los roles de staff
 // + /slot, /information, /banlist (solo rol ROL_ALERTA)
+// + /embed: formulario para publicar un log de staff (strikes, etc.)
 // =====================================================
 const express = require("express");
 const crypto = require("crypto");
@@ -14,6 +15,9 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   escapeMarkdown,
 } = require("discord.js");
 
@@ -58,6 +62,15 @@ const ROL_ALERTA = process.env.ROL_ALERTA || "1562872203928670228";
 
 // Canal donde se registra el chat del juego
 const CANAL_CHAT = process.env.CANAL_CHAT || "1560851695565672458";
+
+// ── /embed (formulario de logs de staff) ──
+// Roles que pueden usar /embed
+const ROLES_EMBED = ["1562872203928670228", "1460341508577427732"];
+// Título del embed
+const TITULO_EMBED = "Magic Domatin | Staff Logs";
+// Canal donde se publica el embed. Si no pones CANAL_STAFF_LOGS en Render,
+// se publica en el mismo canal donde se usó el comando.
+const CANAL_STAFF_LOGS = process.env.CANAL_STAFF_LOGS || "";
 
 // Roles cuyos mensajes se cuentan para /modlist (en este orden se muestran)
 const ROLES_STAFF = ["1460341572703883408", "1557087788845899807"];
@@ -682,6 +695,125 @@ async function comandoRequestBan(interaction) {
 }
 
 // ─────────────────────────────────────────────────────
+// /embed   (solo ROLES_EMBED)
+// Abre un formulario; al enviarlo, el bot publica el log y etiqueta al usuario
+// ─────────────────────────────────────────────────────
+const MODAL_EMBED_ID = "embed_modal";
+
+const puedeUsarEmbed = (interaction) =>
+  !!interaction.member?.roles?.cache?.some((r) => ROLES_EMBED.includes(r.id));
+
+async function comandoEmbed(interaction) {
+  if (!puedeUsarEmbed(interaction)) {
+    return interaction.reply({
+      content: "You do not have permission to use this command.",
+      ephemeral: true,
+    });
+  }
+
+  const modal = new ModalBuilder().setCustomId(MODAL_EMBED_ID).setTitle("Staff Logs");
+
+  const fila = (id, etiqueta, estilo, placeholder, max) =>
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId(id)
+        .setLabel(etiqueta)
+        .setStyle(estilo)
+        .setPlaceholder(placeholder)
+        .setRequired(true)
+        .setMaxLength(max)
+    );
+
+  modal.addComponents(
+    fila("staff_username", "Staff Member Username", TextInputStyle.Short, "Discord username (ej: matiasgamer2609)", 100),
+    fila("tipo", "Type", TextInputStyle.Short, "Ej: Strike", 100),
+    fila("strike", "Strike Number", TextInputStyle.Short, "Ej: 1", 20),
+    fila("razon", "Reason", TextInputStyle.Paragraph, "Ej: Failure to send weekly messages.", 1000)
+  );
+
+  await interaction.showModal(modal);
+}
+
+// Busca un miembro del servidor por mención, ID, username o nombre visible
+async function buscarMiembroDiscord(guild, texto) {
+  const t = String(texto || "").trim();
+  if (!t) return null;
+
+  // Mención <@123> o ID suelto
+  const idMatch = t.match(/^<@!?(\d{15,25})>$/) || t.match(/^(\d{15,25})$/);
+  if (idMatch) {
+    return guild.members.fetch(idMatch[1]).catch(() => null);
+  }
+
+  const q = t.replace(/^@/, "").toLowerCase();
+  const coincide = (mb) =>
+    mb.user.username.toLowerCase() === q ||
+    mb.displayName.toLowerCase() === q ||
+    (mb.user.globalName || "").toLowerCase() === q;
+
+  // Primero en caché
+  const enCache = guild.members.cache.find(coincide);
+  if (enCache) return enCache;
+
+  // Si no, se busca en el servidor
+  const resultados = await guild.members.fetch({ query: q, limit: 10 }).catch(() => null);
+  if (!resultados || !resultados.size) return null;
+  const exacto = resultados.find(coincide);
+  if (exacto) return exacto;
+  return resultados.size === 1 ? resultados.first() : null;
+}
+
+async function enviarModalEmbed(interaction) {
+  if (!puedeUsarEmbed(interaction)) {
+    return interaction.reply({
+      content: "You do not have permission to use this command.",
+      ephemeral: true,
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const usernameTxt = interaction.fields.getTextInputValue("staff_username").trim();
+  const tipo = interaction.fields.getTextInputValue("tipo").trim();
+  const strike = interaction.fields.getTextInputValue("strike").trim();
+  const razon = interaction.fields.getTextInputValue("razon").trim();
+
+  const miembro = await buscarMiembroDiscord(interaction.guild, usernameTxt);
+  if (!miembro) {
+    return interaction.editReply(
+      `No encontré a "${usernameTxt}" en este servidor. Revisa el username (también puedes usar su ID o mención) y vuelve a usar /embed.`
+    );
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0xFFFFFF)
+    .setTitle(TITULO_EMBED)
+    .setDescription(
+      `Staff Member Username: <@${miembro.id}>\n\n` +
+        `Type: ${escapeMarkdown(tipo)}\n\n` +
+        `Strike Number: ${escapeMarkdown(strike)}\n\n` +
+        `Reason: ${escapeMarkdown(razon)}`
+    );
+
+  let destino;
+  try {
+    destino = CANAL_STAFF_LOGS ? await canal(CANAL_STAFF_LOGS) : interaction.channel;
+    await destino.send({
+      content: `<@${miembro.id}>`,
+      embeds: [embed],
+      allowedMentions: { users: [miembro.id] },
+    });
+  } catch (e) {
+    console.error("[Embed] No se pudo publicar:", e.message);
+    return interaction.editReply(
+      "No pude publicar el embed (¿el bot tiene permiso de enviar mensajes en ese canal?): " + e.message
+    );
+  }
+
+  await interaction.editReply(`Log enviado y ${miembro.user.username} fue etiquetado.`);
+}
+
+// ─────────────────────────────────────────────────────
 // /slot User Slot Level [Power]   (solo ROL_ALERTA)
 // Modifica un slot de un jugador que está FUERA del juego
 // ─────────────────────────────────────────────────────
@@ -1022,6 +1154,7 @@ const COMANDOS = {
   slot: comandoSlot,
   information: comandoInformation,
   banlist: comandoBanList,
+  embed: comandoEmbed,
 };
 
 client.on("interactionCreate", async (interaction) => {
@@ -1035,6 +1168,23 @@ client.on("interactionCreate", async (interaction) => {
         .slice(0, 25)
         .map((p) => ({ name: p.nombre, value: p.nombre }));
       await interaction.respond(opciones).catch(() => {});
+    }
+    return;
+  }
+
+  // Formulario de /embed enviado
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId !== MODAL_EMBED_ID) return;
+    try {
+      await enviarModalEmbed(interaction);
+    } catch (e) {
+      console.error(e);
+      const texto = "An error occurred: " + e.message;
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(texto).catch(() => {});
+      } else {
+        await interaction.reply({ content: texto, ephemeral: true }).catch(() => {});
+      }
     }
     return;
   }
@@ -1200,6 +1350,10 @@ client.once("ready", async () => {
     {
       name: "banlist",
       description: "Shows all the banned players and the reason",
+    },
+    {
+      name: "embed",
+      description: "Opens a form to post a staff log (strike, warning, etc.)",
     },
   ];
 
