@@ -67,7 +67,7 @@ const CANAL_CHAT = process.env.CANAL_CHAT || "1560851695565672458";
 // Roles que pueden usar /embed
 const ROLES_EMBED = ["1562872203928670228", "1460341508577427732"];
 // Título del embed
-const TITULO_EMBED = "Magic Domatin | Staff Logs";
+const TITULO_EMBED = "Magic Domain | Staff Logs";
 // Canal donde se publica el embed. Si no pones CANAL_STAFF_LOGS en Render,
 // se publica en el mismo canal donde se usó el comando.
 const CANAL_STAFF_LOGS = process.env.CANAL_STAFF_LOGS || "";
