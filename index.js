@@ -5,6 +5,7 @@
 // + /modlist: mensajes por semana de los usuarios con los roles de staff
 // + /slot, /information, /banlist (solo rol ROL_ALERTA)
 // + /embed: formulario para publicar un log de staff (strikes, etc.)
+// + /gamefeedback: formulario por secciones que publica un feedback con hilo
 // =====================================================
 const express = require("express");
 const crypto = require("crypto");
@@ -71,6 +72,16 @@ const TITULO_EMBED = "Magic Domain | Staff Logs";
 // Canal donde se publica el embed. Si no pones CANAL_STAFF_LOGS en Render,
 // se publica en el mismo canal donde se usó el comando.
 const CANAL_STAFF_LOGS = process.env.CANAL_STAFF_LOGS || "";
+
+// ── /gamefeedback (feedback por secciones + hilo) ──
+// Roles que pueden usar /gamefeedback
+const ROLES_FEEDBACK = ["1562872203928670228", "1460341508577427732"];
+// Canal donde se publica el feedback. Si no pones CANAL_FEEDBACK en Render,
+// se publica en el mismo canal donde se usó el comando.
+const CANAL_FEEDBACK = process.env.CANAL_FEEDBACK || "";
+const MAX_SECCIONES = 6;
+const MAX_DESC_FEEDBACK = 800; // 6 x (800 + título) debe caber en el límite de 6000 caracteres por mensaje
+const MODAL_FEEDBACK_ID = "fb_modal";
 
 // Roles cuyos mensajes se cuentan para /modlist (en este orden se muestran)
 const ROLES_STAFF = ["1460341572703883408", "1557087788845899807"];
@@ -814,6 +825,235 @@ async function enviarModalEmbed(interaction) {
 }
 
 // ─────────────────────────────────────────────────────
+// /gamefeedback   (solo ROLES_FEEDBACK)
+// Discord solo permite 5 campos por formulario, así que se llena por pasos:
+//   1) /gamefeedback abre el formulario de la sección 1 (título obligatorio)
+//   2) aparecen botones: "Add section N" / "Publish" / "Cancel"
+//   3) al publicar se envía UN mensaje con un embed por sección (línea blanca)
+//      y se abre un hilo sobre ese mensaje con el nombre del Titulo1
+// ─────────────────────────────────────────────────────
+const borradoresFeedback = new Map(); // userId -> { secciones: [..6], ts }
+
+// Limpia borradores abandonados (30 min)
+setInterval(() => {
+  const limite = Date.now() - 30 * 60 * 1000;
+  for (const [id, b] of borradoresFeedback) {
+    if (b.ts < limite) borradoresFeedback.delete(id);
+  }
+}, 5 * 60 * 1000);
+
+const puedeUsarFeedback = (interaction) =>
+  !!interaction.member?.roles?.cache?.some((r) => ROLES_FEEDBACK.includes(r.id));
+
+function crearModalFeedback(n) {
+  const modal = new ModalBuilder()
+    .setCustomId(`${MODAL_FEEDBACK_ID}:${n}`)
+    .setTitle(`Game Feedback - Section ${n}/${MAX_SECCIONES}`);
+
+  const fila = (id, etiqueta, estilo, placeholder, max, requerido) =>
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId(id)
+        .setLabel(etiqueta)
+        .setStyle(estilo)
+        .setPlaceholder(placeholder)
+        .setRequired(requerido)
+        .setMaxLength(max)
+    );
+
+  modal.addComponents(
+    fila(
+      "titulo",
+      `Titulo${n}${n === 1 ? " (required)" : " (optional)"}`,
+      TextInputStyle.Short,
+      "Ej: How do I purchase items?",
+      100,
+      n === 1
+    ),
+    fila(
+      "descripcion",
+      `Descripcion${n} (optional)`,
+      TextInputStyle.Paragraph,
+      "Ej: Simply walk up to the item and interact with it!",
+      MAX_DESC_FEEDBACK,
+      false
+    ),
+    fila(
+      "imagen",
+      `ImagenLink${n} (optional)`,
+      TextInputStyle.Short,
+      "https://...",
+      500,
+      false
+    )
+  );
+  return modal;
+}
+
+// Mensaje privado con el resumen y los botones
+function panelFeedback(draft, n) {
+  const resumen = draft.secciones
+    .map((s, i) => (s ? `**${i + 1}.** ${escapeMarkdown(s.titulo || "(no title)")}${s.imagen ? " 🖼️" : ""}` : null))
+    .filter(Boolean)
+    .join("\n");
+
+  const botones = [];
+  if (n < MAX_SECCIONES) {
+    botones.push(
+      new ButtonBuilder()
+        .setCustomId(`fb_next:${n + 1}`)
+        .setLabel(`Add section ${n + 1}`)
+        .setStyle(ButtonStyle.Primary)
+    );
+  }
+  botones.push(
+    new ButtonBuilder().setCustomId("fb_publish").setLabel("Publish").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId("fb_cancel").setLabel("Cancel").setStyle(ButtonStyle.Danger)
+  );
+
+  return {
+    content:
+      `**Game Feedback — draft**\n${resumen}\n\n` +
+      (n < MAX_SECCIONES
+        ? "Add another section or publish it now."
+        : "You reached the maximum of 6 sections. Publish it now."),
+    components: [new ActionRowBuilder().addComponents(botones)],
+  };
+}
+
+async function comandoGameFeedback(interaction) {
+  if (!puedeUsarFeedback(interaction)) {
+    return interaction.reply({
+      content: "You do not have permission to use this command.",
+      ephemeral: true,
+    });
+  }
+  await interaction.showModal(crearModalFeedback(1));
+}
+
+// Se ejecuta cuando se envía el formulario de una sección
+async function enviarModalFeedback(interaction) {
+  if (!puedeUsarFeedback(interaction)) {
+    return interaction.reply({
+      content: "You do not have permission to use this command.",
+      ephemeral: true,
+    });
+  }
+
+  const n = Number(interaction.customId.split(":")[1]);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_SECCIONES) return;
+
+  const titulo = interaction.fields.getTextInputValue("titulo").trim();
+  const descripcion = interaction.fields.getTextInputValue("descripcion").trim();
+  const imagen = interaction.fields.getTextInputValue("imagen").trim();
+
+  if (imagen && !/^https?:\/\/\S+$/i.test(imagen)) {
+    return interaction.reply({
+      content: `The ImagenLink${n} is not a valid link (it must start with http:// or https://). Press the button again to retry.`,
+      ephemeral: true,
+    });
+  }
+
+  let draft = borradoresFeedback.get(interaction.user.id);
+  if (n === 1) {
+    draft = { secciones: Array(MAX_SECCIONES).fill(null), ts: Date.now() };
+    borradoresFeedback.set(interaction.user.id, draft);
+  } else if (!draft) {
+    return interaction.reply({
+      content: "Your draft expired. Use /gamefeedback again.",
+      ephemeral: true,
+    });
+  }
+
+  draft.ts = Date.now();
+  draft.secciones[n - 1] = titulo || descripcion || imagen ? { titulo, descripcion, imagen } : null;
+
+  const panel = panelFeedback(draft, n);
+  if (interaction.isFromMessage()) {
+    await interaction.update(panel);
+  } else {
+    await interaction.reply({ ...panel, ephemeral: true });
+  }
+}
+
+// Botones del borrador: fb_next:N / fb_publish / fb_cancel
+async function botonFeedback(interaction) {
+  if (!puedeUsarFeedback(interaction)) {
+    return interaction.reply({
+      content: "You do not have permission to use this command.",
+      ephemeral: true,
+    });
+  }
+
+  const [accion, arg] = interaction.customId.split(":");
+  const draft = borradoresFeedback.get(interaction.user.id);
+
+  if (accion === "fb_cancel") {
+    borradoresFeedback.delete(interaction.user.id);
+    return interaction.update({ content: "Feedback cancelled.", components: [] });
+  }
+
+  if (!draft) {
+    return interaction.update({
+      content: "Your draft expired. Use /gamefeedback again.",
+      components: [],
+    });
+  }
+
+  if (accion === "fb_next") {
+    const n = Number(arg);
+    if (!Number.isInteger(n) || n < 2 || n > MAX_SECCIONES) return;
+    return interaction.showModal(crearModalFeedback(n));
+  }
+
+  if (accion === "fb_publish") {
+    await interaction.deferUpdate();
+
+    const embeds = draft.secciones
+      .filter(Boolean)
+      .map((s) => {
+        const e = new EmbedBuilder().setColor(0xFFFFFF); // línea izquierda blanca
+        if (s.titulo) e.setTitle(`🔹 ${s.titulo}`);
+        if (s.descripcion) e.setDescription(s.descripcion);
+        if (s.imagen) e.setImage(s.imagen);
+        return e;
+      });
+
+    const tituloHilo = (draft.secciones[0]?.titulo || "Game Feedback").slice(0, 100);
+
+    let msg;
+    try {
+      const destino = CANAL_FEEDBACK ? await canal(CANAL_FEEDBACK) : interaction.channel;
+      msg = await destino.send({ embeds });
+    } catch (e) {
+      console.error("[Feedback] No se pudo publicar:", e.message);
+      return interaction.editReply({
+        content:
+          "I couldn't publish the feedback (check the image links and that the bot can send messages/embeds in the channel): " +
+          e.message,
+        components: [],
+      });
+    }
+
+    // Hilo sobre el mismo mensaje, con el nombre del Titulo1
+    let hilo = null;
+    try {
+      hilo = await msg.startThread({ name: tituloHilo, autoArchiveDuration: 10080 });
+    } catch (e) {
+      console.error("[Feedback] No se pudo crear el hilo:", e.message);
+    }
+
+    borradoresFeedback.delete(interaction.user.id);
+    return interaction.editReply({
+      content: hilo
+        ? `Feedback published and thread <#${hilo.id}> created.`
+        : "Feedback published, but I couldn't create the thread (the bot needs the \"Create Public Threads\" permission).",
+      components: [],
+    });
+  }
+}
+
+// ─────────────────────────────────────────────────────
 // /slot User Slot Level [Power]   (solo ROL_ALERTA)
 // Modifica un slot de un jugador que está FUERA del juego
 // ─────────────────────────────────────────────────────
@@ -1155,7 +1395,18 @@ const COMANDOS = {
   information: comandoInformation,
   banlist: comandoBanList,
   embed: comandoEmbed,
+  gamefeedback: comandoGameFeedback,
 };
+
+// Responde con el error de forma privada, sin importar en qué estado esté la interacción
+async function responderError(interaction, e) {
+  const texto = "An error occurred: " + e.message;
+  if (interaction.deferred || interaction.replied) {
+    await interaction.followUp({ content: texto, ephemeral: true }).catch(() => {});
+  } else {
+    await interaction.reply({ content: texto, ephemeral: true }).catch(() => {});
+  }
+}
 
 client.on("interactionCreate", async (interaction) => {
   // Autocompletado del poder en /slot
@@ -1172,18 +1423,21 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  // Formulario de /embed enviado
+  // Formularios enviados (/embed y /gamefeedback)
   if (interaction.isModalSubmit()) {
-    if (interaction.customId !== MODAL_EMBED_ID) return;
+    let manejador;
+    if (interaction.customId === MODAL_EMBED_ID) manejador = enviarModalEmbed;
+    else if (interaction.customId.startsWith(`${MODAL_FEEDBACK_ID}:`)) manejador = enviarModalFeedback;
+    else return;
+
     try {
-      await enviarModalEmbed(interaction);
+      await manejador(interaction);
     } catch (e) {
       console.error(e);
-      const texto = "An error occurred: " + e.message;
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply(texto).catch(() => {});
+      if (interaction.deferred) {
+        await interaction.editReply("An error occurred: " + e.message).catch(() => {});
       } else {
-        await interaction.reply({ content: texto, ephemeral: true }).catch(() => {});
+        await responderError(interaction, e);
       }
     }
     return;
@@ -1207,6 +1461,17 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (!interaction.isButton()) return;
+
+  // Botones del borrador de /gamefeedback
+  if (interaction.customId.startsWith("fb_")) {
+    try {
+      await botonFeedback(interaction);
+    } catch (e) {
+      console.error(e);
+      await responderError(interaction, e);
+    }
+    return;
+  }
 
   // Botón "Reviewed" de los registros de acciones (/kick /serverban /tp)
   if (interaction.customId === "reviewed") {
@@ -1354,6 +1619,10 @@ client.once("ready", async () => {
     {
       name: "embed",
       description: "Opens a form to post a staff log (strike, warning, etc.)",
+    },
+    {
+      name: "gamefeedback",
+      description: "Opens a form to post game feedback (up to 6 sections) and creates a thread",
     },
   ];
 
