@@ -80,7 +80,10 @@ const ROLES_FEEDBACK = ["1562872203928670228", "1460341508577427732"];
 // se publica en el mismo canal donde se usó el comando.
 const CANAL_FEEDBACK = process.env.CANAL_FEEDBACK || "";
 const MAX_SECCIONES = 6;
-const MAX_DESC_FEEDBACK = 800; // 6 x (800 + título) debe caber en el límite de 6000 caracteres por mensaje
+// 4000 es el MÁXIMO que Discord permite en un campo de formulario (modal).
+// Ya no hay límite total: si las secciones no caben en un solo mensaje
+// (límite de 6000 caracteres por mensaje), el bot las reparte en varios mensajes.
+const MAX_DESC_FEEDBACK = 4000;
 const MODAL_FEEDBACK_ID = "fb_modal";
 
 // Roles cuyos mensajes se cuentan para /modlist (en este orden se muestran)
@@ -829,10 +832,16 @@ async function enviarModalEmbed(interaction) {
 // Discord solo permite 5 campos por formulario, así que se llena por pasos:
 //   1) /gamefeedback abre el formulario de la sección 1 (título obligatorio)
 //   2) aparecen botones: "Add section N" / "Publish" / "Cancel"
-//   3) al publicar se envía UN mensaje con un embed por sección (línea blanca)
-//      y se abre un hilo sobre ese mensaje con el nombre del Titulo1
+//   3) al publicar se envía un embed por sección (línea blanca). Si todo no cabe
+//      en un solo mensaje (máx. 6000 caracteres / 10 embeds), se reparte en
+//      varios mensajes seguidos. Se abre un hilo sobre el ÚLTIMO mensaje
+//      con el nombre del Titulo1
 // ─────────────────────────────────────────────────────
 const borradoresFeedback = new Map(); // userId -> { secciones: [..6], ts }
+
+// Límites de Discord para los mensajes con embeds
+const LIMITE_CHARS_MENSAJE = 5900; // Discord: 6000 por mensaje (dejamos margen)
+const LIMITE_EMBEDS_MENSAJE = 10;
 
 // Limpia borradores abandonados (30 min)
 setInterval(() => {
@@ -1019,12 +1028,37 @@ async function botonFeedback(interaction) {
         return e;
       });
 
+    if (!embeds.length) {
+      return interaction.editReply({
+        content: "The draft is empty. Use /gamefeedback again.",
+        components: [],
+      });
+    }
+
+    // Reparte los embeds en uno o varios mensajes (máx. 10 embeds y ~6000 caracteres por mensaje)
+    const mensajes = [];
+    let actual = [];
+    let chars = 0;
+    for (const e of embeds) {
+      const largo = (e.data.title || "").length + (e.data.description || "").length;
+      if (actual.length && (actual.length >= LIMITE_EMBEDS_MENSAJE || chars + largo > LIMITE_CHARS_MENSAJE)) {
+        mensajes.push(actual);
+        actual = [];
+        chars = 0;
+      }
+      actual.push(e);
+      chars += largo;
+    }
+    if (actual.length) mensajes.push(actual);
+
     const tituloHilo = (draft.secciones[0]?.titulo || "Game Feedback").slice(0, 100);
 
-    let msg;
+    let ultimoMsg;
     try {
       const destino = CANAL_FEEDBACK ? await canal(CANAL_FEEDBACK) : interaction.channel;
-      msg = await destino.send({ embeds });
+      for (const grupo of mensajes) {
+        ultimoMsg = await destino.send({ embeds: grupo });
+      }
     } catch (e) {
       console.error("[Feedback] No se pudo publicar:", e.message);
       return interaction.editReply({
@@ -1035,10 +1069,10 @@ async function botonFeedback(interaction) {
       });
     }
 
-    // Hilo sobre el mismo mensaje, con el nombre del Titulo1
+    // Hilo sobre el último mensaje, con el nombre del Titulo1
     let hilo = null;
     try {
-      hilo = await msg.startThread({ name: tituloHilo, autoArchiveDuration: 10080 });
+      hilo = await ultimoMsg.startThread({ name: tituloHilo, autoArchiveDuration: 10080 });
     } catch (e) {
       console.error("[Feedback] No se pudo crear el hilo:", e.message);
     }
